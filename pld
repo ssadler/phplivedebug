@@ -1,0 +1,103 @@
+#!/usr/bin/env python
+
+import sys, socket, json, SocketServer
+
+termcolors = {
+	'black': '0;30',
+	'cyan': '36',
+	'purple': '35',
+	'h_white': '47',
+	'h_red': '41',
+	'h_green': '42',
+	'yellow': '33',
+}
+
+def colorise(data, color, bold=False):
+    code = ('1;' if bold else '') + termcolors[color]
+    return "\033[%sm%s\033[1;m" % (code, data)
+
+class ReusableThreadingTCPServer(SocketServer.ThreadingTCPServer):
+    allow_reuse_address = True
+
+class PLDHandler(SocketServer.StreamRequestHandler):
+    def __init__(self, *args, **kwargs):
+        self.last_file = None
+        self.last_line = None
+        self.interacting = False
+        SocketServer.StreamRequestHandler.__init__(self, *args, **kwargs)
+    
+    def handle(self):
+        method, data, meta = self.read_request()
+        out = getattr(self, '_'+method)(data, meta) or ''
+        self.wfile.write("PLD:[\"ok\",%s]\n%s" % (len(out), out))
+    
+    def route(self, method):
+        return getattr(self, '_'+method)
+
+    def read_request(self):
+        assert self.request.recv(4) == "PLD:", 'request badly formed'
+        header = self.rfile.readline().strip()
+        method, len, meta = json.loads(header)
+        data = self.rfile.read(int(len))
+        return method, data, meta
+    
+    def print_caller(func):
+        def inner(self, data, meta):
+            if self.interacting:
+                return
+            file, line = meta['file'], meta['line']
+            if (file, line) != (self.last_file, self.last_line):
+                self.last_file = file
+                self.last_line = line
+                print colorise('From: %s:%s'%(file, line), 'yellow', True)
+            return func(self, data, meta)
+        return inner
+            
+            
+        
+    @print_caller
+    def _echo(self, data, meta):
+        print data
+
+    
+    #@print_caller
+    def _interact(self, data, meta):
+        print data
+        return raw_input('php> ')
+
+
+
+    
+
+        
+"""
+        
+    def interact(self, data):
+        _from = data[len('//SocketPrinter//interact/'):]
+        print "interacting with ", _from, "\n"
+        while True:
+            sys.stdout.write('php> ')
+            sys.stdout.flush()
+            try:
+                data = raw_input('')
+            except KeyboardInterrupt:
+                break
+            self.request.send('read:%-7s%s' % (len(data), data))
+            data = self.request.recv(12)
+            if not data.startswith('read:'):
+                return
+            recvlen = int(data[5:].strip())
+            if recvlen > 0:
+                print self.request.recv(recvlen)
+        self.request.send('quit')
+            
+"""
+def main():
+    try:
+        ReusableThreadingTCPServer(('127.0.0.1', 34455),
+                                   PLDHandler).serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+__name__ == "__main__" and main()
+
