@@ -1,24 +1,32 @@
 #!/usr/bin/env python
 
-import sys, socket, json, SocketServer
+import sys, socket, json, SocketServer, select
 from itertools import takewhile
 from subprocess import Popen, PIPE, check_call, CalledProcessError
+import readline
 
 class PLDServer(SocketServer.ThreadingTCPServer):
     allow_reuse_address = True
 
 class PLDHandler(SocketServer.BaseRequestHandler):
+    last_file = None
+    last_line = None
     def __init__(self, *args, **kwargs):
-        self.last_file = None
-        self.last_line = None
         SocketServer.BaseRequestHandler.__init__(self, *args, **kwargs)
     
     def handle(self):
+        self.close = True
         while True:
-            method, data, meta = self.read_request()
-            out = getattr(self, '_'+method)(data, meta) or ''
-            response = """PLD:["ok",%s]\n%s""" % (len(out), out)
-            self.request.sendall(response)
+            self.handle_one()
+            if self.close:
+                break
+
+    def handle_one(self):
+        method, data, meta = self.read_request()
+        out = getattr(self, '_'+method)(data, meta) or ''
+        debug(out)
+        response = """PLD:["ok",%s]\n%s""" % (len(out), out)
+        self.request.sendall(response)
 
     def read_request(self):
         header = ''.join(takewhile(lambda c: c != "\n",
@@ -35,8 +43,8 @@ class PLDHandler(SocketServer.BaseRequestHandler):
         def inner(self, data, meta):
             file, line = meta['file'], meta['line']
             if (file, line) != (self.last_file, self.last_line):
-                self.last_file = file
-                self.last_line = line
+                PLDHandler.last_file = file
+                PLDHandler.last_line = line
                 print colorise('From: %s:%s'%(file, line), 'yellow', True)
             return func(self, data, meta)
         return inner
@@ -47,14 +55,21 @@ class PLDHandler(SocketServer.BaseRequestHandler):
 
     @print_caller
     def _interact(self, data, meta):
-        if data:
-            print data
+        self.close = False
+        sys.stdout.write(data)
         try:
-            return PhpChecker.prepare(raw_input('php> '))
-        except PhpChecker.PhpSyntaxError as e:
-            print colorise(e, 'cyan')
+            while True:
+                try:
+                    return PhpChecker.prepare(raw_input('php> '))
+                #except KeyboardInterrupt:
+                #    print "KeyboardInterrupt"
+                #    pass
+                except PhpChecker.PhpSyntaxError as e:
+                    debug('PhpSyntaxError')
+                    print e
         except EOFError:
-            print
+            self.close = True
+            print ''
             return ':quit'
     
     @staticmethod
@@ -114,11 +129,15 @@ def colorise(data, color, bold=False):
     code = ('1;' if bold else '') + termcolors[color]
     return "\033[%sm%s\033[1;m" % (code, data)
 
+def debug(data):
+    return
+    print colorise(data, 'h_green')
 
 def main():
     try:
         PLDServer(('127.0.0.1', 34455), PLDHandler).serve_forever()
     except KeyboardInterrupt:
+        
         pass
 
 __name__ == "__main__" and main()
