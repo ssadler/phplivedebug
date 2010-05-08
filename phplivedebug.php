@@ -17,8 +17,8 @@ class PhpLiveDebugClient {
     function get() {
         $client = new self;
         if (!$client->sock)
-            $client->sock = $sock = @fsockopen('127.0.0.1', 34455, $errno,
-                                               $errstr, 0.1);
+            $client->sock = @fsockopen('127.0.0.1', 34455, $errno,
+                                       $errstr, 0.1);
         return $client->sock ? $client : null;
     }
     
@@ -37,7 +37,7 @@ class PhpLiveDebugClient {
         return $data;
     }
     
-    function _echo($args, $stack_depth=3) {
+    static function dump($args) {
         ob_start();
         foreach ($args as $arg) {
             if (is_scalar($arg) || is_null($arg))
@@ -45,7 +45,14 @@ class PhpLiveDebugClient {
             else
                 print_r($arg);
         }
-        $data = ob_get_clean();
+        $out = ob_get_clean();
+        if ("\n" != substr($out, -1))
+            $out .= "\n";
+        return $out;
+    }
+    
+    function _echo($args, $stack_depth=3) {
+        $data = self::dump($args);
         $meta = $this->get_meta($stack_depth+1);
         $this->send('echo', $data, $meta);
     }
@@ -70,14 +77,18 @@ class PhpLiveDebugClient {
 function __interact() {
     #INTERACT_CODE_START
     if ($__pld = PhpLiveDebugClient::get()) {
-        $__pld_output = '';
+        $__pld_o = '';
         while (true) {
-            $__pld_code = $__pld->_interact($__pld_output);
-            if (':quit' == $__pld_code)
+            $__pld_code = $__pld->_interact($__pld_o);
+            if ('break;' == $__pld_code)
                 break;
             ob_start();
-            echo eval($__pld_code);
-            $__pld_output = ob_get_clean();
+            $__pld_r = eval($__pld_code);
+            $__pld_o = ob_get_clean();
+            if (strlen($__pld_o) and "\n" != substr($__pld_o, -1))
+                $__pld_o .= "\n";
+            if (null !== $__pld_r)
+                $__pld_o .= PhpLiveDebugClient::dump(array($__pld_r));
         }
     }
     #INTERACT_CODE_END
