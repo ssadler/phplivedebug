@@ -1,22 +1,10 @@
 #!/usr/bin/env python
 
 import sys, socket, json, SocketServer
+from itertools import takewhile
+from subprocess import Popen, PIPE, check_call, CalledProcessError
 
-termcolors = {
-	'black': '0;30',
-	'cyan': '36',
-	'purple': '35',
-	'h_white': '47',
-	'h_red': '41',
-	'h_green': '42',
-	'yellow': '33',
-}
-
-def colorise(data, color, bold=False):
-    code = ('1;' if bold else '') + termcolors[color]
-    return "\033[%sm%s\033[1;m" % (code, data)
-
-class ReusableThreadingTCPServer(SocketServer.ThreadingTCPServer):
+class PLDServer(SocketServer.ThreadingTCPServer):
     allow_reuse_address = True
 
 class PLDHandler(SocketServer.BaseRequestHandler):
@@ -26,27 +14,21 @@ class PLDHandler(SocketServer.BaseRequestHandler):
         SocketServer.BaseRequestHandler.__init__(self, *args, **kwargs)
     
     def handle(self):
-        method, data, meta = self.read_request()
-        out = getattr(self, '_'+method)(data, meta) or ''
-        response = """PLD:["ok",%s]\n%s""" % (len(out), out)
-        print type(self.request)
-        print dir(self.request)
-        self.request.send(response)
-        
-    def route(self, method):
-        return getattr(self, '_'+method)
+        while True:
+            method, data, meta = self.read_request()
+            out = getattr(self, '_'+method)(data, meta) or ''
+            response = """PLD:["ok",%s]\n%s""" % (len(out), out)
+            self.request.sendall(response)
 
     def read_request(self):
-        assert self.request.recv(4) == "PLD:", 'request badly formed'
-        header = ''
-        while True:
-            c = self.request.recv(1)
-            if c == "\n":
-                break
-            else:
-                header += c
-        method, len, meta = json.loads(header)
-        data = self.request.recv(int(len))
+        header = ''.join(takewhile(lambda c: c != "\n",
+                                   self.sock_chars(self.request)))
+        bytes = header[:4]
+        assert bytes == "PLD:", 'Bad protocol: ' + repr(bytes)
+        method, length, meta = json.loads(header[4:])
+        data = ''
+        if length > 0:
+            data = self.request.recv(length)
         return method, data, meta
     
     def print_caller(func):
@@ -58,51 +40,85 @@ class PLDHandler(SocketServer.BaseRequestHandler):
                 print colorise('From: %s:%s'%(file, line), 'yellow', True)
             return func(self, data, meta)
         return inner
-            
-            
-        
+    
     @print_caller
     def _echo(self, data, meta):
         print data
 
-    
-    #@print_caller
+    @print_caller
     def _interact(self, data, meta):
-        return raw_input('php> ')
-
-
-
+        if data:
+            print data
+        try:
+            return PhpChecker.prepare(raw_input('php> '))
+        except PhpChecker.PhpSyntaxError as e:
+            print colorise(e, 'cyan')
+        except EOFError:
+            print
+            return ':quit'
     
-
-        
-"""
-        
-    def interact(self, data):
-        _from = data[len('//SocketPrinter//interact/'):]
-        print "interacting with ", _from, "\n"
+    @staticmethod
+    def sock_chars(s, n=1):
         while True:
-            sys.stdout.write('php> ')
-            sys.stdout.flush()
-            try:
-                data = raw_input('')
-            except KeyboardInterrupt:
-                break
-            self.request.send('read:%-7s%s' % (len(data), data))
-            data = self.request.recv(12)
-            if not data.startswith('read:'):
-                return
-            recvlen = int(data[5:].strip())
-            if recvlen > 0:
-                print self.request.recv(recvlen)
-        self.request.send('quit')
-            
-"""
+            yield s.recv(n)
+
+
+class PhpChecker:
+    have_php = False
+    try:
+        have_php = not check_call(["php", "-v"], stdin=PIPE, stdout=PIPE, stderr=PIPE)
+    except CalledProcessError:
+        pass
+    
+    class PhpSyntaxError(SyntaxError):
+        pass
+    
+    @classmethod
+    def test_code(cls, code):
+        php = Popen(['php', '-l'], stdin=PIPE, stdout=PIPE, stderr=PIPE)
+        err, out = php.communicate('<?php ' + code)
+        if 0 != php.returncode:
+            raise cls.PhpSyntaxError(cls.format_error(err))
+    
+    @staticmethod
+    def format_error(err):
+        lines = err.strip().splitlines()
+        return '\n'.join(lines[:-1])
+
+    @classmethod
+    def prepare(cls, code):
+        code += ';'
+        if not cls.have_php:
+            return code
+        cls.test_code(code)
+        try:
+            code2 = 'return ' + code
+            cls.test_code(code2)
+            return code2
+        except cls.PhpSyntaxError as e:
+            return code
+
+
+termcolors = {
+    'black': '0;30',
+    'cyan': '36',
+    'purple': '35',
+    'h_white': '47',
+    'h_red': '41',
+    'h_green': '42',
+    'yellow': '33',
+    'red': '31',
+}
+
+def colorise(data, color, bold=False):
+    code = ('1;' if bold else '') + termcolors[color]
+    return "\033[%sm%s\033[1;m" % (code, data)
+
+
 def main():
     try:
-        ReusableThreadingTCPServer(('127.0.0.1', 34455),
-                                   PLDHandler).serve_forever()
+        PLDServer(('127.0.0.1', 34455), PLDHandler).serve_forever()
     except KeyboardInterrupt:
         pass
 
 __name__ == "__main__" and main()
-
