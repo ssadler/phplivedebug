@@ -9,8 +9,7 @@ def setup():
     try:
         have_php = not check_call(["php", "-v"], stdin=PIPE,
                                   stdout=PIPE, stderr=PIPE)
-        
-    except CalledProcessError:
+    except OSError, CalledProcessError:
         have_php = False
 
 def get_code():
