@@ -1,44 +1,36 @@
 #!/usr/bin/env python
 
-import sys, socket, json, SocketServer, select
-from itertools import takewhile
-from subprocess import Popen, PIPE, check_call, CalledProcessError
-import readline
+import sys, json, SocketServer, php_input, select
 
-class PLDServer(SocketServer.ThreadingTCPServer):
+class PLDServer(SocketServer.TCPServer):
     allow_reuse_address = True
 
 class PLDHandler(SocketServer.BaseRequestHandler):
     last_file = None
     last_line = None
-    def __init__(self, *args, **kwargs):
-        SocketServer.BaseRequestHandler.__init__(self, *args, **kwargs)
     
     def handle(self):
-        self.close = True
+        # read request
+        header, c = '', ''
         while True:
-            self.handle_one()
-            if self.close:
+            c = self.request.recv(1)
+            if c == "\n":
                 break
-
-    def handle_one(self):
-        method, data, meta = self.read_request()
-        out = getattr(self, '_'+method)(data, meta) or ''
-        debug(out)
-        response = """PLD:["ok",%s]\n%s""" % (len(out), out)
-        self.request.sendall(response)
-
-    def read_request(self):
-        header = ''.join(takewhile(lambda c: c != "\n",
-                                   self.sock_chars(self.request)))
+            header += c
         bytes = header[:4]
         assert bytes == "PLD:", 'Bad protocol: ' + repr(bytes)
         method, length, meta = json.loads(header[4:])
         data = ''
-        if length > 0:
-            data = self.request.recv(length)
-        return method, data, meta
-    
+        while length > 0:
+            chunk = self.request.recv(1024)
+            length -= len(chunk)
+            data += chunk
+        
+        # respond
+        out = getattr(self, '_'+method)(data, meta) or ''
+        response = """PLD:["ok",%s]\n%s""" % (len(out), out)
+        self.request.sendall(response)
+        
     def print_caller(func):
         def inner(self, data, meta):
             file, line = meta['file'], meta['line']
@@ -51,68 +43,12 @@ class PLDHandler(SocketServer.BaseRequestHandler):
     
     @print_caller
     def _echo(self, data, meta):
-        print data
+        sys.stdout.write(data)
 
     @print_caller
     def _interact(self, data, meta):
-        self.close = False
-        sys.stdout.write(data)
-        try:
-            while True:
-                try:
-                    return PhpChecker.prepare(raw_input('php> '))
-                #except KeyboardInterrupt:
-                #    print "KeyboardInterrupt"
-                #    pass
-                except PhpChecker.PhpSyntaxError as e:
-                    debug('PhpSyntaxError')
-                    print e
-        except EOFError:
-            self.close = True
-            print ''
-            return ':quit'
-    
-    @staticmethod
-    def sock_chars(s, n=1):
-        while True:
-            yield s.recv(n)
-
-
-class PhpChecker:
-    have_php = False
-    try:
-        have_php = not check_call(["php", "-v"], stdin=PIPE, stdout=PIPE, stderr=PIPE)
-    except CalledProcessError:
-        pass
-    
-    class PhpSyntaxError(SyntaxError):
-        pass
-    
-    @classmethod
-    def test_code(cls, code):
-        php = Popen(['php', '-l'], stdin=PIPE, stdout=PIPE, stderr=PIPE)
-        err, out = php.communicate('<?php ' + code)
-        if 0 != php.returncode:
-            raise cls.PhpSyntaxError(cls.format_error(err))
-    
-    @staticmethod
-    def format_error(err):
-        lines = err.strip().splitlines()
-        return '\n'.join(lines[:-1])
-
-    @classmethod
-    def prepare(cls, code):
-        code += ';'
-        if not cls.have_php:
-            return code
-        cls.test_code(code)
-        try:
-            code2 = 'return ' + code
-            cls.test_code(code2)
-            return code2
-        except cls.PhpSyntaxError as e:
-            return code
-
+        self._echo(data, meta)
+        return php_input.get_code()
 
 termcolors = {
     'black': '0;30',
@@ -129,15 +65,15 @@ def colorise(data, color, bold=False):
     code = ('1;' if bold else '') + termcolors[color]
     return "\033[%sm%s\033[1;m" % (code, data)
 
-def debug(data):
-    return
-    print colorise(data, 'h_green')
-
 def main():
+    try:
+        import readline
+    except ImportError:
+        pass
+    php_input.setup()
     try:
         PLDServer(('127.0.0.1', 34455), PLDHandler).serve_forever()
     except KeyboardInterrupt:
-        
         pass
 
 __name__ == "__main__" and main()

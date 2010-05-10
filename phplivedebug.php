@@ -1,25 +1,32 @@
 <?php
 
-function __() {
-    $client = PhpLiveDebugClient::get();
-    if (!$client)
-        return;
-    $args = func_get_args();
-    $client->_echo($args);
-}
-
 class PhpLiveDebugException extends Exception {}
 
 class PhpLiveDebugClient {
     
     private $sock = null;
+    public static $t = null;
     
-    function get() {
-        $client = new self;
-        if (!$client->sock)
-            $client->sock = $sock = @fsockopen('127.0.0.1', 34455, $errno,
-                                               $errstr, 0.1);
-        return $client->sock ? $client : null;
+    function connect() {
+        $this->sock = @fsockopen('127.0.0.1', 34455, $errno, $errstr, 0.1);
+        return (bool)$this->sock;
+    }
+    
+    function __destruct() {
+        if ($this->sock) {
+            stream_socket_shutdown($this->sock, STREAM_SHUT_RDWR);
+            fclose($this->sock);
+            $this->sock = null;
+        }
+    }
+    
+    function write($data) {
+        for ($written = 0; $written < strlen($data); $written += $fwrite) {
+            $fwrite = fwrite($this->sock, substr($data, $written));
+            if ($fwrite === false)
+                break;
+        }
+        return $written;
     }
     
     function send($method, $data, $meta) {
@@ -27,7 +34,7 @@ class PhpLiveDebugClient {
         $data = (string)$data;
         $out = sprintf("PLD:[\"%s\",%s,%s]\n%s", $method, strlen($data), $meta,
                        $data);
-        fwrite($this->sock, $out);
+        $this->write($out);
         $protocol = fread($this->sock, 4);
         $this->assert($protocol == "PLD:", "bad response");
         $header = fgets($this->sock);
@@ -37,7 +44,7 @@ class PhpLiveDebugClient {
         return $data;
     }
     
-    function _echo($args, $stack_depth=3) {
+    static function dump($args) {
         ob_start();
         foreach ($args as $arg) {
             if (is_scalar($arg) || is_null($arg))
@@ -45,9 +52,18 @@ class PhpLiveDebugClient {
             else
                 print_r($arg);
         }
-        $data = ob_get_clean();
+        $out = ob_get_clean();
+        if ("\n" != substr($out, -1))
+            $out .= "\n";
+        return $out;
+    }
+    
+    function _echo($args, $stack_depth=1) {
+        $__pld->html_errors = ini_get('html_errors'); ini_set('html_errors', 'Off');
+        $data = self::dump($args);
         $meta = $this->get_meta($stack_depth+1);
         $this->send('echo', $data, $meta);
+        ini_set('html_errors', $__pld__html_errors);
     }
     
     private function get_meta($stack_depth) {
@@ -57,6 +73,7 @@ class PhpLiveDebugClient {
         return $meta;
     }
     function _interact($input, $stack_depth=1) {
+        stream_set_timeout($this->sock, 150); 
         $meta = $this->get_meta($stack_depth+1);
         return $this->send('interact', $input, $meta);
     }
@@ -65,30 +82,54 @@ class PhpLiveDebugClient {
         if (!$cond)
             throw new PhpLiveDebugException($msg);
     }
-}
 
-function __interact() {
-    #INTERACT_CODE_START
-    if ($__pld = PhpLiveDebugClient::get()) {
-        $__pld_output = '';
-        while (true) {
-            $__pld_code = $__pld->_interact($__pld_output);
-            if (':quit' == $__pld_code)
+    private function interact_code_dummy_func() {
+        #INTERACT_CODE_START
+        $__pld = new StdClass;
+        $__pld->html_errors = ini_get('html_errors'); ini_set('html_errors', 'Off');
+        $__pld->client = new PhpLiveDebugClient;
+        $__pld->out = '';
+        $__pld->err = null;
+        while ($__pld->client->connect()) {
+            $__pld->code = $__pld->client->_interact($__pld->out);
+            if ('break;' == $__pld->code)
                 break;
             ob_start();
-            echo eval($__pld_code);
-            $__pld_output = ob_get_clean();
+            try {
+                $__pld->ret = eval($__pld->code);
+                $__pld->out = ob_get_clean();
+                if (strlen($__pld->out) and "\n" != substr($__pld->out, -1))
+                    $__pld->out .= "\n";
+                if (null !== $__pld->ret)
+                    $__pld->out .= PhpLiveDebugClient::dump(array($__pld->ret));
+            } catch (Exception $e) {
+                if (is_a($e, 'PhpLiveDebugException')) throw $e;
+                $__pld_out = PhpLiveDebugClient::dump($e);
+            }
         }
+        unset($__pld->client);
+        ini_set('html_errors', $__pld__html_errors);
+        #INTERACT_CODE_END
     }
-    #INTERACT_CODE_END
+
+    static function get_interact_code() {
+        $this_file = file_get_contents(__FILE__);
+        preg_match('/#INTERACT_CODE_START(.+?)#INTERACT_CODE_END/s',
+                   file_get_contents(__FILE__), $match);
+        PhpLiveDebugClient::assert($match, 'failed getting interact code');
+        return trim($match[1]);
+    }
 }
 
-function __pld_get_interact_code() {
-    $this_file = file_get_contents(__FILE__);
-    preg_match('/#INTERACT_CODE_START(.+?)#INTERACT_CODE_END/s',
-               file_get_contents(__FILE__), $match);
-    PhpLiveDebugClient::assert($match, 'failed getting interact code');
-    return trim($match[1]);
-}
-define('__', __pld_get_interact_code());
 
+
+function __() {
+    if ($client = PhpLiveDebugClient::get()) {
+        $args = func_get_args();
+        $client->_echo($args);   
+    }
+}
+
+define('__', PhpLiveDebugClient::get_interact_code());
+
+PhpLiveDebugClient::$t = microtime(1);
