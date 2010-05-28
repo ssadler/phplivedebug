@@ -1,49 +1,84 @@
 #!/usr/bin/env python
 
-import sys, json, SocketServer, php_input, select
+import sys, errno, socket, json, php_input, swirl
+from tornado import ioloop, iostream
 
-class PLDServer(SocketServer.TCPServer):
-    allow_reuse_address = True
+last_file = None
+last_line = None
 
-class PLDHandler(SocketServer.BaseRequestHandler):
-    last_file = None
-    last_line = None
+class PLDServer:
+    def __init__(self):
+        self.sock = sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setblocking(0)
+        sock.bind(('127.0.0.1', 34455))
+        sock.listen(5000)
+        io_loop = ioloop.IOLoop.instance()
+        io_loop.add_handler(sock.fileno(), self.serve_request, io_loop.READ)
+        try:
+            io_loop.start()
+        except KeyboardInterrupt:
+            io_loop.stop()
+            print "exited cleanly"
     
-    def handle(self):
-        # read request
-        header, c = '', ''
+    def serve_request(self, fd, events):
         while True:
-            c = self.request.recv(1)
-            if c == "\n":
-                break
-            header += c
-        bytes = header[:4]
-        assert bytes == "PLD:", 'Bad protocol: ' + repr(bytes)
-        method, length, meta = json.loads(header[4:])
-        data = ''
-        while length > 0:
-            chunk = self.request.recv(1024)
-            length -= len(chunk)
-            data += chunk
-        
-        # respond
-        out = getattr(self, '_'+method)(data, meta) or ''
-        response = """PLD:["ok",%s]\n%s""" % (len(out), out)
-        self.request.sendall(response)
-        
+            try:
+                connection, address = self.sock.accept()
+            except socket.error, e:
+                if e[0] not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    raise
+                return
+            connection.setblocking(0)
+            stream = iostream.IOStream(connection)
+            PLDHandler(stream)
+
+class PLDHandler:
+    def __init__(self, stream):
+        self.stream = stream
+        stream.read_until('\r\n', self._on_headers)
+    
+    def async_callback(func):
+        def inner(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except:
+                self.stream.close()
+                raise
+        return inner
+
     def print_caller(func):
         def inner(self, data, meta):
-            file, line = meta['file'], meta['line']
-            if (file, line) != (self.last_file, self.last_line):
-                PLDHandler.last_file = file
-                PLDHandler.last_line = line
+            global last_file, last_line
+            file, line = meta.get('file'), meta.get('line')
+            if file and line and (file, line) != (last_file, last_line):
+                last_file = file
+                last_line = line
                 print colorise('From: %s:%s'%(file, line), 'yellow', True)
             return func(self, data, meta)
         return inner
     
+    @async_callback
+    def _on_headers(self, header):
+        proto = header[:4]
+        assert proto == 'PLD:', 'Bad protocol: ' + repr(proto)
+        self.method, length, self.meta = json.loads(header[4:])
+        self.stream.read_bytes(length, self._on_data)
+    
+    @async_callback
+    def _on_data(self, data):
+        out = getattr(self, '_'+self.method)(data, self.meta) or ''
+        response = """PLD:["ok",%s]\r\n%s""" % (len(out), out)
+        self.stream.write(response, self._on_written)
+    
+    @async_callback
+    def _on_written(self):
+        self.stream.close()
+
     @print_caller
     def _echo(self, data, meta):
         sys.stdout.write(data)
+        sys.stdout.flush()
 
     @print_caller
     def _interact(self, data, meta):
@@ -72,7 +107,7 @@ def main():
         pass
     php_input.setup()
     try:
-        PLDServer(('127.0.0.1', 34455), PLDHandler).serve_forever()
+        PLDServer()
     except KeyboardInterrupt:
         pass
 
